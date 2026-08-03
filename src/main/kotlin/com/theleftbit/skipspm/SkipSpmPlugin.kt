@@ -41,6 +41,7 @@ class SkipSpmPlugin : Plugin<Project> {
         // convention, so seeding there rather than here is what keeps `put("internal","debug")` additive.
         ext.variantBuildMode.convention(emptyMap())
         ext.exposeAsApi.convention(false)
+        ext.skipVersionCheck.convention("warn")
         ext.consumers.convention(listOf(project.path))
 
         // The package to export comes from either a local dir or a Git clone (validated below). For
@@ -76,6 +77,7 @@ class SkipSpmPlugin : Plugin<Project> {
                 abis.set(if (mode == "release") ext.releaseAbis.orElse(ext.abis) else ext.abis)
                 namespacePrefix.set(ext.namespacePrefix)
                 outputDir.set(ext.outputDir.dir(mode))
+                skipVersionCheck.set(ext.skipVersionCheck)
             }
         }
 
@@ -104,6 +106,9 @@ class SkipSpmPlugin : Plugin<Project> {
         }
 
         project.afterEvaluate {
+            require(ext.skipVersionCheck.get() in listOf("warn", "fail", "off")) {
+                "skipSpm: skipVersionCheck must be \"warn\", \"fail\", or \"off\", was '${ext.skipVersionCheck.get()}'."
+            }
             @Suppress("DEPRECATION")
             if (ext.pruneStaleTransforms.isPresent) {
                 logger.warn(

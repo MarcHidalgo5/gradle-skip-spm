@@ -77,6 +77,14 @@ abstract class SkipExportTask : DefaultTask() {
     @get:OutputDirectory
     abstract val outputDir: DirectoryProperty
 
+    /**
+     * What to do when the `skip` CLI version drifts from the version the package declares
+     * (see [verifySkipCliVersion]): `"warn"` (default), `"fail"`, or `"off"`. Not an input —
+     * it changes diagnostics, never the exported AARs.
+     */
+    @get:Internal
+    abstract val skipVersionCheck: Property<String>
+
     @get:Inject
     abstract val execOps: ExecOperations
 
@@ -84,6 +92,7 @@ abstract class SkipExportTask : DefaultTask() {
     fun export() {
         val pkg = packageDir.get().asFile
         val out = outputDir.get().asFile
+        verifySkipCliVersion(pkg)
         var selfCleaned = false
         while (true) {
             try {
@@ -168,6 +177,43 @@ abstract class SkipExportTask : DefaultTask() {
                 "skip export produced husk AARs (no compiled classes): " + husks.joinToString { it.name },
             )
         }
+    }
+
+    /**
+     * Preflights the `skip` CLI version against the version the package declares — the
+     * `Package.resolved` pin of the `skip` package when present, else the `Package.swift`
+     * requirement on `skip.git`. CLI and skipstone plugin ship from the same repo and version
+     * stream, so drift between them produces cryptic far-away failures (unresolved bridge symbols
+     * in generated Kotlin, transpiler errors against newer skip-fuse-ui). Per [skipVersionCheck]
+     * this warns (default), fails, or is off. Runs only when the export itself runs — an
+     * up-to-date export can't be hurt by drift. Never fails on check *infrastructure* (missing
+     * files, unparseable output): only a positively detected mismatch is reported.
+     */
+    private fun verifySkipCliVersion(pkg: File) {
+        val mode = skipVersionCheck.getOrElse("warn")
+        if (mode == "off") return
+        val expected = expectedSkipVersion(
+            File(pkg, "Package.swift").takeIf { it.isFile }?.readText(),
+            File(pkg, "Package.resolved").takeIf { it.isFile }?.readText(),
+        ) ?: return
+        val versionOutput = ByteArrayOutputStream()
+        val result = runCatching {
+            execOps.exec {
+                commandLine(resolveSkipExecutable(), "version")
+                isIgnoreExitValue = true
+                standardOutput = versionOutput
+                errorOutput = versionOutput
+            }
+        }.getOrNull() ?: return
+        if (result.exitValue != 0) return
+        val cliVersion = parseSkipCliVersion(versionOutput.toString()) ?: return
+        val mismatch = expected.mismatchWith(cliVersion) ?: return
+        if (mode == "fail") {
+            throw GradleException(
+                "skipSpm: $mismatch (set skipSpm.skipVersionCheck = \"warn\" or \"off\" to demote this).",
+            )
+        }
+        logger.warn("skipSpm: $mismatch")
     }
 
     /**

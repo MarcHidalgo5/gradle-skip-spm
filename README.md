@@ -111,6 +111,31 @@ export once from scratch (expect that one build to take as long as a clean expor
 clean re-export fails, the build fails with a pointer to `cleanSharedBuild` / `gradle clean`,
 which deletes the package's entire `.build/`.
 
+## Toolchain version check
+
+The `skip` CLI (Homebrew) and the skipstone transpiler (the `skip` SwiftPM package your
+`Package.swift` pins) ship from the same repo and version stream, and drift between them causes
+cryptic export failures far from the cause — transpile errors against a newer `skip-fuse-ui`,
+unresolved bridge symbols in the generated Kotlin. Before each export the task compares
+`skip version` against the version the package declares:
+
+- the **`Package.resolved` pin** of the `skip` package, when the committed lockfile has one
+  (treated as exact), else
+- the **`Package.swift` requirement** on `skip.git`: `exact: "…"` must match the CLI exactly;
+  `from:` / `.upToNextMajor(from:)` only require the CLI to be at least that version.
+
+On drift the export **warns** by default:
+
+```
+skipSpm: the skip CLI is 1.9.4 but the package pins skip 1.9.3 (Package.swift/Package.resolved).
+Align them: update the pin to 1.9.4, or install skip 1.9.3.
+```
+
+Tune it with `skipVersionCheck = "fail"` (fail the export instead — recommended for CI) or
+`"off"`. The check only runs when an export actually runs, never fails on its own infrastructure
+(a missing/unparseable `skip version` is ignored), and packages that declare no skip version at
+all are never flagged.
+
 ## Native libraries & app size (stripping)
 
 `skip export` compiles the shared Swift to **native `.so`** — the umbrella module plus the Swift

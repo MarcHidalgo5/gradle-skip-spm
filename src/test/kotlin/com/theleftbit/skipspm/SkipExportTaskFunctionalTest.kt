@@ -117,10 +117,57 @@ class SkipExportTaskFunctionalTest {
         assertContains(result.output, "cleanSharedBuild")
     }
 
-    private fun runner(fakeSkip: File): GradleRunner {
+    @Test
+    fun `warns by default when the skip CLI drifts from the manifest pin`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val fakeSkip = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
+
+        // Fake CLI reports 1.9.3; the manifest pins 9.9.9 exactly.
+        val result = runner(
+            fakeSkip,
+            packageSwift = """.package(url: "https://source.skip.tools/skip.git", exact: "9.9.9"),""",
+        ).build()
+
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertContains(result.output, "the skip CLI is 1.9.3 but the package pins skip 9.9.9")
+    }
+
+    @Test
+    fun `fails on drift when skipVersionCheck is fail`() {
+        val fakeSkip = writeFakeSkip("exit 0")
+
+        val result = runner(
+            fakeSkip,
+            packageSwift = """.package(url: "https://source.skip.tools/skip.git", exact: "9.9.9"),""",
+            extraTaskConfig = """skipVersionCheck.set("fail")""",
+        ).buildAndFail()
+
+        assertContains(result.output, "the skip CLI is 1.9.3 but the package pins skip 9.9.9")
+    }
+
+    @Test
+    fun `matching cli version stays silent`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val fakeSkip = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
+
+        val result = runner(
+            fakeSkip,
+            packageSwift = """.package(url: "https://source.skip.tools/skip.git", exact: "1.9.3"),""",
+            extraTaskConfig = """skipVersionCheck.set("fail")""",
+        ).build()
+
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertFalse(result.output.contains("skip CLI"), "no drift message expected")
+    }
+
+    private fun runner(
+        fakeSkip: File,
+        packageSwift: String = "// swift-tools-version:5.9",
+        extraTaskConfig: String = "",
+    ): GradleRunner {
         File(pkgDir, "Sources").mkdirs()
         File(pkgDir, "Sources/placeholder.swift").writeText("// swift source")
-        File(pkgDir, "Package.swift").writeText("// swift-tools-version:5.9")
+        File(pkgDir, "Package.swift").writeText(packageSwift)
         File(projectDir, "settings.gradle.kts").writeText("rootProject.name = \"export-test\"")
         File(projectDir, "build.gradle.kts").writeText(
             """
@@ -135,6 +182,7 @@ class SkipExportTaskFunctionalTest {
                 abis.set(listOf("arm64-v8a"))
                 namespacePrefix.set("com.test.shared")
                 outputDir.set(layout.projectDirectory.dir("lib/debug"))
+                $extraTaskConfig
             }
             """.trimIndent(),
         )
@@ -151,6 +199,7 @@ class SkipExportTaskFunctionalTest {
         script.writeText(
             buildString {
                 appendLine("#!/bin/bash")
+                appendLine("if [ \"\$1\" = \"version\" ]; then echo \"Skip version 1.9.3\"; exit 0; fi")
                 appendLine("out=\"\"")
                 appendLine("prev=\"\"")
                 appendLine("for a in \"\$@\"; do")

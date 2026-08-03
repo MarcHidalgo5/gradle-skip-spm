@@ -25,9 +25,10 @@ import org.jetbrains.gradle.ext.TaskTriggersConfig
  *  - each mapped variant's `api`/`implementation` config consumes them via `fileTree(...).builtBy(task)`
  *    — in this project and in every project listed in `consumers` (multi-module apps apply the
  *    plugin once, e.g. on the root project, and list the modules that need the shared types),
- *  - a gradle-idea-ext `afterSync` trigger regenerates them on Gradle sync so AS resolves symbols,
- *  - each export prunes the previous AARs' now-stale artifact-transform cache entries
- *    (`pruneStaleTransforms`), which would otherwise leak GBs/day under active development.
+ *  - a gradle-idea-ext `afterSync` trigger regenerates them on Gradle sync so AS resolves symbols.
+ *
+ * The exploded-AAR transform cache (`~/.gradle/caches/<version>/transforms`) grows with every
+ * shared-package change; bound it with Gradle's own cache-retention config (README, "Disk usage").
  */
 class SkipSpmPlugin : Plugin<Project> {
 
@@ -40,7 +41,6 @@ class SkipSpmPlugin : Plugin<Project> {
         // convention, so seeding there rather than here is what keeps `put("internal","debug")` additive.
         ext.variantBuildMode.convention(emptyMap())
         ext.exposeAsApi.convention(false)
-        ext.pruneStaleTransforms.convention(true)
         ext.consumers.convention(listOf(project.path))
 
         // The package to export comes from either a local dir or a Git clone (validated below). For
@@ -76,8 +76,6 @@ class SkipSpmPlugin : Plugin<Project> {
                 abis.set(if (mode == "release") ext.releaseAbis.orElse(ext.abis) else ext.abis)
                 namespacePrefix.set(ext.namespacePrefix)
                 outputDir.set(ext.outputDir.dir(mode))
-                pruneStaleTransforms.set(ext.pruneStaleTransforms)
-                gradleUserHomeDir.set(project.gradle.gradleUserHomeDir)
             }
         }
 
@@ -106,6 +104,15 @@ class SkipSpmPlugin : Plugin<Project> {
         }
 
         project.afterEvaluate {
+            @Suppress("DEPRECATION")
+            if (ext.pruneStaleTransforms.isPresent) {
+                logger.warn(
+                    "skipSpm: pruneStaleTransforms is a deprecated no-op — the plugin no longer " +
+                        "prunes the transform cache (unsafe with multiple checkouts/worktrees). " +
+                        "Bound the cache with Gradle's own retention config instead; see the " +
+                        "plugin README's \"Disk usage\" section.",
+                )
+            }
             // Source: exactly one of packageDir (local) or packageGit (remote).
             val remote = ext.packageGit.isPresent
             require(remote != ext.packageDir.isPresent) {

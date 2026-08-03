@@ -18,10 +18,16 @@ import org.gradle.process.ExecOperations
 import org.gradle.work.DisableCachingByDefault
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.io.OutputStream
 import java.net.URI
 import java.nio.file.FileSystems
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 import javax.inject.Inject
@@ -71,14 +77,6 @@ abstract class SkipExportTask : DefaultTask() {
     @get:OutputDirectory
     abstract val outputDir: DirectoryProperty
 
-    /** Whether to delete stale transform-cache entries after the export (see [pruneStaleTransformEntries]). */
-    @get:Internal
-    abstract val pruneStaleTransforms: Property<Boolean>
-
-    /** Gradle user home, where the transform caches to prune live (`<home>/caches/<version>/transforms`). */
-    @get:Internal
-    abstract val gradleUserHomeDir: Property<File>
-
     @get:Inject
     abstract val execOps: ExecOperations
 
@@ -86,16 +84,10 @@ abstract class SkipExportTask : DefaultTask() {
     fun export() {
         val pkg = packageDir.get().asFile
         val out = outputDir.get().asFile
-        // Hash the previous AARs before anything touches them: the transform-cache prune must only
-        // target AARs whose bytes actually changed in this export (see pruneStaleTransformEntries).
-        // Computed once, outside the self-heal loop, so a healed retry still prunes against the
-        // AARs that existed before this task ran (the first attempt deletes them).
-        val previousHashes = out.listFiles { f -> f.extension == "aar" }
-            ?.associate { it.name to it.contentHash() }.orEmpty()
         var selfCleaned = false
         while (true) {
             try {
-                exportOnce(pkg, out, previousHashes)
+                exportOnce(pkg, out)
                 return
             } catch (stale: StaleTranspilerOutputsException) {
                 val transpilerOutputs = File(pkg, TRANSPILER_OUTPUTS_PATH)
@@ -114,13 +106,16 @@ abstract class SkipExportTask : DefaultTask() {
                         "This happens when something re-resolved the package outside Gradle " +
                         "(e.g. `skip android test`, or a `git restore` of Package.resolved).",
                 )
-                transpilerOutputs.deleteRecursively()
+                // NOT deleteRecursively(): skipstone's outputs tree contains directory symlinks
+                // back into the package's real Sources/ and .build/checkouts, and
+                // File.deleteRecursively follows them — a self-heal would wipe the actual sources.
+                deleteRecursivelyNoFollowLinks(transpilerOutputs)
             }
         }
     }
 
-    /** One full export attempt: run skip, normalize the AAR namespaces, reject husks, prune caches. */
-    private fun exportOnce(pkg: File, out: File, previousHashes: Map<String, String>) {
+    /** One full export attempt: run skip, normalize the AAR namespaces, reject husks. */
+    private fun exportOnce(pkg: File, out: File) {
         out.mkdirs()
         // Drop stale AARs so a removed module's leftover can't linger and get consumed.
         out.listFiles { f -> f.extension == "aar" }?.forEach { it.delete() }
@@ -165,110 +160,14 @@ abstract class SkipExportTask : DefaultTask() {
 
         // skip export can complete successfully while packaging "husk" AARs — a module whose
         // classes.jar is an empty zip. The breakage then surfaces far away (hundreds of unresolved
-        // references when the consuming app compiles), so validate here, BEFORE the transform-cache
-        // prune (a failed attempt must not prune): every Skip module compiles at least some Kotlin,
-        // so an AAR with zero .class entries is always a silently broken export.
+        // references when the consuming app compiles), so validate here: every Skip module compiles
+        // at least some Kotlin, so an AAR with zero .class entries is always a silently broken export.
         val husks = aars.filterNot(::aarHasCompiledClasses)
         if (husks.isNotEmpty()) {
             throw StaleTranspilerOutputsException(
                 "skip export produced husk AARs (no compiled classes): " + husks.joinToString { it.name },
             )
         }
-
-        if (pruneStaleTransforms.getOrElse(true)) {
-            // Prune only AARs whose bytes PROVABLY changed: a previous hash exists and differs (or
-            // the AAR disappeared). skip's underlying Android build is reproducible, so a re-export
-            // very often reproduces byte-identical AARs whose transform entries are still LIVE —
-            // deleting those hands dangling paths to a warm daemon (observed as "unresolved
-            // reference" for every shared class in consumers). Crucially, an AAR with NO previous
-            // hash (post-clean, or a first build against an already-populated cache) must never
-            // prune: the just-regenerated bytes can be identical to what existing entries hold.
-            val currentHashes = aars.associate { it.name to it.contentHash() }
-            val staleNames = previousHashes.keys.filter { previousHashes[it] != currentHashes[it] }
-            if (staleNames.isNotEmpty()) {
-                runCatching { pruneStaleTransformEntries(staleNames, mode, prefix) }
-                    .onFailure { logger.warn("skipSpm: pruning stale transform-cache entries failed (build unaffected): $it") }
-            }
-        }
-    }
-
-    /**
-     * Deletes Gradle artifact-transform cache entries for the given AAR file names.
-     *
-     * AGP consumes an AAR by *exploding* it (classes.jar + every native `.so`) into a
-     * content-addressed entry under `~/.gradle/caches/<version>/transforms/<hash>/transformed/`.
-     * When an export changes an AAR's bytes, the entries for the previous bytes become garbage —
-     * but Gradle's own cleanup only removes entries unused for ~7 days, which under active
-     * shared-package development accumulates gigabytes per day (a single exploded umbrella AAR can
-     * be ~0.5 GB). This runs right after a successful export, restricted by the caller to AARs
-     * whose content actually CHANGED in this export (plus removed ones): their old-content entries
-     * are stale by construction, while byte-identical re-exports keep their still-live entries —
-     * deleting an entry the running daemon still references breaks the build (dangling classpath
-     * paths, no re-transform). Only entries attributable to these AARs by output name are touched;
-     * callers treat failures as non-fatal.
-     */
-    private fun pruneStaleTransformEntries(aarNames: Collection<String>, mode: String, prefix: String) {
-        if (aarNames.isEmpty()) return
-        val caches = File(gradleUserHomeDir.get(), "caches")
-        // Version-scoped `caches/<gradleVersion>/transforms` (Gradle 8.8+) plus any legacy
-        // cross-version `caches/transforms-N` (older Gradle) still on disk.
-        val transformRoots = caches.listFiles { f -> f.isDirectory }.orEmpty().mapNotNull { dir ->
-            if (dir.name.startsWith("transforms-")) dir
-            else File(dir, "transforms").takeIf { it.isDirectory }
-        }
-        // A transform names its output after its input, so entries for `USLive-release.aar` show up
-        // as `transformed/USLive-release/` (exploded), `USLive-release.aar`,
-        // `USLive-release-runtime.jar`, … plus R-class entries named after the rewritten manifest
-        // package (`com.foo.shared.uslive`, `com.foo.shared.uslive-r.txt`).
-        val stems = aarNames.flatMap { name ->
-            val base = name.removeSuffix(".aar")
-            listOf(base, manifestPackageFor(base, mode, prefix))
-        }.toSet()
-        fun matches(name: String) = stems.any { name == it || name.startsWith("$it.") || name.startsWith("$it-") }
-
-        // Never prune a young entry, even for changed bytes: a live daemon caches transform
-        // identity→workspace in memory for its whole lifetime WITHOUT re-checking existence, so if
-        // the content later reverts to an identity the daemon already loaded (branch flip-flop,
-        // stash/pop — cheap with skip's reproducible output), a deleted entry resurfaces as a
-        // dangling classpath path. Old entries are what actually bloats the cache (days of churn);
-        // fresh churn self-prunes once it ages past this window on a later export.
-        val ageCutoffMillis = System.currentTimeMillis() - MIN_PRUNE_AGE_HOURS * 60L * 60L * 1000L
-        var pruned = 0
-        var freedBytes = 0L
-        transformRoots.forEach { root ->
-            root.listFiles { f -> f.isDirectory }.orEmpty().forEach { entry ->
-                val outputs = File(entry, "transformed").listFiles().orEmpty()
-                if (outputs.isNotEmpty() && outputs.all { matches(it.name) } &&
-                    entry.lastModified() < ageCutoffMillis
-                ) {
-                    val size = entry.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
-                    if (entry.deleteRecursively()) {
-                        pruned++
-                        freedBytes += size
-                    }
-                }
-            }
-        }
-        if (pruned > 0) {
-            logger.lifecycle(
-                "skipSpm: pruned $pruned stale transform-cache entries " +
-                    "(${freedBytes / (1024 * 1024)} MB) for changed AARs: ${aarNames.sorted().joinToString(", ")}",
-            )
-        }
-    }
-
-    /** SHA-256 of the file's bytes, streamed. */
-    private fun File.contentHash(): String {
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-        inputStream().use { input ->
-            val buffer = ByteArray(1 shl 16)
-            while (true) {
-                val read = input.read(buffer)
-                if (read < 0) break
-                digest.update(buffer, 0, read)
-            }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     /**
@@ -396,14 +295,6 @@ abstract class SkipExportTask : DefaultTask() {
         const val MAX_EXPORT_ATTEMPTS = 3
         const val RETRY_BACKOFF_SECONDS = 10
 
-        /**
-         * Minimum age before a stale transform entry may be pruned. Must comfortably exceed a
-         * working session's daemon lifetime so an in-memory identity→workspace reference can never
-         * point at a pruned dir (see [pruneStaleTransformEntries]); Gradle daemons idle out after
-         * 3h, but active use keeps them alive all day.
-         */
-        const val MIN_PRUNE_AGE_HOURS = 24
-
         /** Substrings (apostrophe-free, so skip's curly `’` doesn't matter) that mark a retryable fetch failure. */
         val TRANSIENT_FETCH_HINTS = listOf(
             "fetch updates from remote", // skip/SPM: "Couldn't fetch updates from remote repositories"
@@ -462,6 +353,33 @@ private val STALE_BRIDGE_SYMBOLS = listOf(
     "SkipLogger",
     "sref",
 )
+
+/**
+ * Deletes [root] recursively WITHOUT following directory symlinks: a symlink is deleted as a link,
+ * never descended into. Kotlin's `File.deleteRecursively` (java.io semantics) follows them, which
+ * is catastrophic here — skipstone's `.build/plugins/outputs` tree symlinks back into the package's
+ * real `Sources/` and `.build/checkouts`. `Files.walkFileTree` does not follow symlinks unless
+ * `FOLLOW_LINKS` is passed, and visits a symlink (even one pointing at a directory) via
+ * `visitFile`, so deleting there removes just the link.
+ */
+internal fun deleteRecursivelyNoFollowLinks(root: File) {
+    if (!Files.exists(root.toPath(), LinkOption.NOFOLLOW_LINKS)) return
+    Files.walkFileTree(
+        root.toPath(),
+        object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                Files.deleteIfExists(file)
+                return FileVisitResult.CONTINUE
+            }
+
+            override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
+                exc?.let { throw it }
+                Files.deleteIfExists(dir)
+                return FileVisitResult.CONTINUE
+            }
+        },
+    )
+}
 
 /** True when the AAR has a classes.jar containing at least one compiled class. */
 internal fun aarHasCompiledClasses(aar: File): Boolean {

@@ -58,11 +58,19 @@ class SkipExportTaskFunctionalTest {
         staleJunk.parentFile.mkdirs()
         staleJunk.writeText("stale")
 
-        val result = runner(fakeSkip).build()
+        val gradleRunner = runner(fakeSkip)
+        // skipstone's outputs symlink back into the package's real Sources; the self-heal must
+        // delete the link itself, never the sources behind it.
+        val sourcesLink = File(staleJunk.parentFile, "swift-sources")
+        java.nio.file.Files.createSymbolicLink(sourcesLink.toPath(), File(pkgDir, "Sources").toPath())
+        val realSource = File(pkgDir, "Sources/placeholder.swift")
+
+        val result = gradleRunner.build()
 
         assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
         assertContains(result.output, "stale transpiler outputs")
         assertFalse(staleJunk.exists(), "self-heal should have deleted the transpiler outputs")
+        assertTrue(realSource.isFile, "self-heal must not follow symlinks into the real Sources")
         val aar = File(projectDir, "lib/debug/TestModule-debug.aar")
         assertTrue(aar.isFile, "the retried export should have produced the AAR")
         assertContains(readManifest(aar), "package=\"com.test.shared.testmodule\"")
@@ -127,7 +135,6 @@ class SkipExportTaskFunctionalTest {
                 abis.set(listOf("arm64-v8a"))
                 namespacePrefix.set("com.test.shared")
                 outputDir.set(layout.projectDirectory.dir("lib/debug"))
-                pruneStaleTransforms.set(false)
             }
             """.trimIndent(),
         )

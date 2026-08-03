@@ -37,8 +37,11 @@ The plugin:
   project and in every project listed in `consumers` (see
   ["Multi-module apps"](#multi-module-apps) below),
 - registers a `gradle-idea-ext` `afterSync` trigger so the IDE resolves the shared symbols on sync,
-- prunes the previous AARs' stale transform-cache entries after each export (see
-  ["Disk usage"](#disk-usage-gradles-transforms-cache) below).
+- self-heals stale skip incremental state (a failed export against desynced `.build/` outputs is
+  retried once from scratch) and rejects silently-broken "husk" AARs.
+
+Exploded-AAR transform-cache growth is left to Gradle's own cleanup — configure it once, see
+["Disk usage"](#disk-usage-gradles-transforms-cache) below.
 
 ## Multi-module apps
 
@@ -191,49 +194,40 @@ android {
 AGP consumes an AAR by **exploding** it — classes.jar plus every native `.so` — into a
 content-addressed entry under `~/.gradle/caches/<gradle-version>/transforms/`. For a Skip export
 one exploded umbrella AAR can be ~0.5 GB, and **every shared-package change creates brand-new
-entries** while the previous ones sit until Gradle's own cleanup reaps entries unused for ~7 days.
-Under active development that leaks gigabytes per day.
+entries** while the previous ones sit until Gradle's cleanup reaps entries unused for ~7 days
+(the default). Under active development that accumulates gigabytes per day.
 
-The plugin therefore prunes automatically (**`pruneStaleTransforms`, default `true`**): after each
-export it compares every AAR's bytes against the previous export, and deletes the transform entries
-of the AARs that provably **changed**, logging what it freed:
+**The plugin does not prune this cache itself** (versions ≤ 0.2.x did; removed in 0.3.0, and the
+`pruneStaleTransforms` option is now a deprecated no-op). Transform entries are only attributable
+to an AAR by *name* — and every checkout or git worktree of the same app exports identically-named
+AARs, so a plugin-side prune from one checkout could delete an entry that another checkout's live
+Gradle daemon still referenced. Daemons cache transform locations in memory for their whole
+lifetime *without re-checking they exist*, so the victim build fails with unresolved shared classes
+or dangling classpath paths and no local cause. Only Gradle itself keeps the cross-build usage
+journal that makes deletion safe.
 
-```
-skipSpm: pruned 24 stale transform-cache entries (5842 MB) for changed AARs: USLive-release.aar, …
-```
-
-Two safety rules keep this from ever yanking an entry a build still needs — a live Gradle daemon
-caches transform locations in memory for its whole lifetime *without re-checking they exist*, so a
-wrongly deleted entry resurfaces as unresolved shared classes or a missing-file failure:
-
-- **Only provably-stale content**: byte-identical re-exports (common — skip's underlying Android
-  build is reproducible) and exports with no previous AARs to compare against (right after a clean,
-  or a first build on a machine with a populated cache) never prune.
-- **Only entries older than ~24 h**: young entries may still be referenced by a live daemon (or
-  match content a branch switch flips back to). Old churn is what actually bloats the cache, and
-  fresh churn self-prunes on a later export once it ages past the window.
-
-For the same reason, never `rm -rf` the transforms cache while builds/IDE syncs are running — stop
-the daemons first (`./gradlew --stop`).
-
-Only entries whose transform *output name* is attributable to this package's AARs (e.g.
-`USLive-release/`, `USLive-release-runtime.jar`, `com.foo.shared.uslive-r.txt`) are touched;
-everything else in the cache is left alone, and a prune failure never fails the build. Set
-`pruneStaleTransforms = false` only if concurrent builds of **another checkout** share the same
-Gradle user home and might be reading same-named entries mid-build.
-
-To also cap the rest of the cache, shorten Gradle's retention — this is Gradle-user-home-wide
-configuration, so an init script is the only supported place (a project plugin can't set it):
+Instead, shorten Gradle's own retention for "created resources" (the bucket transforms live in).
+Gradle's cleanup never removes an entry any recent build used — from *any* checkout sharing the
+user home — which is exactly the guarantee a plugin can't provide. This is Gradle-user-home-wide
+configuration, so Gradle only accepts it in an **init script** (not in a project's
+`settings.gradle.kts` or `build.gradle.kts`):
 
 ```kotlin
 // ~/.gradle/init.d/cache-retention.init.gradle.kts
 beforeSettings {
     caches {
-        // Transforms fall under "created resources"; the default is 7 days.
+        // Transforms fall under "created resources"; the default retention is 7 days.
         createdResources.setRemoveUnusedEntriesAfterDays(2)
     }
 }
 ```
+
+By default Gradle runs this cleanup at most once every 24 h, at the end of a build session; add
+`cleanup.set(Cleanup.ALWAYS)` inside the `caches {}` block to run it after every session if disk
+pressure is severe.
+
+Never `rm -rf` the transforms cache by hand while builds or IDE syncs are running — stop the
+daemons first (`./gradlew --stop`).
 
 ## Developing against a real app
 

@@ -94,21 +94,13 @@ abstract class SkipSpmExtension {
     abstract val consumers: ListProperty<String>
 
     /**
-     * Prune Gradle's artifact-transform cache after each export. Defaults to true.
-     *
-     * AGP consumes an AAR by *exploding* it (classes.jar plus all the native `.so`) into a
-     * content-addressed entry under `~/.gradle/caches/<version>/transforms/`. Each entry is as
-     * large as the unpacked AARs (hundreds of MB), every content change strands the previous
-     * entries as garbage, and Gradle's own cleanup only reaps entries unused for ~7 days — so
-     * active shared-package development leaks gigabytes per day. When enabled, each export deletes
-     * the transform entries of the AARs whose bytes provably *changed* in that export (a previous
-     * AAR existed and hashed differently), and only entries older than ~24h — a live daemon caches
-     * transform locations in memory for its whole lifetime without re-checking existence, so
-     * anything younger (or anything that might match regenerated content: byte-identical
-     * re-exports, post-clean exports with no baseline) is left alone. Old churn is what actually
-     * bloats the cache, and it self-prunes on later exports once aged. Disable only if concurrent
-     * builds of *another* checkout may be consuming the same AAR names from the same Gradle user
-     * home mid-build.
+     * Deprecated no-op. The plugin no longer prunes Gradle's artifact-transform cache: entries are
+     * only distinguishable by AAR *name*, and every checkout/worktree of the same app produces the
+     * same names — so a prune from one checkout could delete entries another checkout's live daemon
+     * still referenced (dangling classpath, unresolved shared classes, no local cause). Only Gradle
+     * itself knows which entries recent builds used; bound the cache with Gradle's own cleanup
+     * instead — see the README's "Disk usage" section for the init-script recipe.
      */
+    @Deprecated("No-op since 0.3.0; configure Gradle's own cache retention instead (see README).")
     abstract val pruneStaleTransforms: Property<Boolean>
 }

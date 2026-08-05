@@ -109,6 +109,15 @@ abstract class SkipSpmExtension {
     abstract val skipVersionCheck: Property<String>
 
     /**
+     * Whether the nested `gradle` builds `skip export` spawns may use the Gradle build cache.
+     * Defaults to false: their expensive step (the Swift cross-compile) is an ad-hoc exec Gradle
+     * can't cache anyway — only the bridge-Kotlin compile / packaging steps would hit — and on
+     * billed remote caches (e.g. Bitrise) every cache-reading Gradle invocation costs money. The
+     * outer build's own cache usage is unaffected. Set true to let the nested builds cache.
+     */
+    abstract val childGradleBuildCache: Property<Boolean>
+
+    /**
      * Deprecated no-op. The plugin no longer prunes Gradle's artifact-transform cache: entries are
      * only distinguishable by AAR *name*, and every checkout/worktree of the same app produces the
      * same names — so a prune from one checkout could delete entries another checkout's live daemon

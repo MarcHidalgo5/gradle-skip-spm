@@ -136,6 +136,25 @@ Tune it with `skipVersionCheck = "fail"` (fail the export instead — recommende
 (a missing/unparseable `skip version` is ignored), and packages that declare no skip version at
 all are never flagged.
 
+## Nested `gradle` builds
+
+`skip export` shells out to a bare `gradle` for its nested per-module builds. Since 0.5.0 the
+plugin leads the PATH those children see with **the Gradle installation running the outer build**
+(the wrapper dist when launched via `gradlew`/Android Studio), so the nested builds always match
+the repo's pinned Gradle version — no Homebrew-vs-wrapper drift, and no "provide `gradle` on
+PATH" shim in CI containers where no system Gradle exists.
+
+The children also run with the **Gradle build cache off** by default: their expensive step (the
+Swift cross-compile) is an ad-hoc exec Gradle can't cache anyway, and on billed remote caches
+(e.g. Bitrise) every cache-reading invocation costs money. The outer build's own caching is
+unaffected. Opt the children back in with:
+
+```kotlin
+skipSpm {
+    childGradleBuildCache = true
+}
+```
+
 ## Native libraries & app size (stripping)
 
 `skip export` compiles the shared Swift to **native `.so`** — the umbrella module plus the Swift

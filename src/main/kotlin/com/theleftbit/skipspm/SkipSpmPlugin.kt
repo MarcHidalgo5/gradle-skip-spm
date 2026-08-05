@@ -16,6 +16,7 @@ import org.gradle.plugins.ide.idea.model.IdeaModel
 import org.jetbrains.gradle.ext.IdeaExtPlugin
 import org.jetbrains.gradle.ext.ProjectSettings
 import org.jetbrains.gradle.ext.TaskTriggersConfig
+import java.io.File
 
 /**
  * Builds a Skip (SwiftPM) package into Android AARs via `skip export` and wires them into the
@@ -43,6 +44,15 @@ class SkipSpmPlugin : Plugin<Project> {
         ext.exposeAsApi.convention(false)
         ext.skipVersionCheck.convention("warn")
         ext.consumers.convention(listOf(project.path))
+        ext.childGradleBuildCache.convention(false)
+
+        // The Gradle installation driving this build — the wrapper dist when launched via
+        // gradlew/AS. Null-guarded: embedded runners can have no home; then the export task
+        // falls back to plain PATH resolution for skip's children, as before.
+        val gradleInstallBin = project.gradle.gradleHomeDir
+            ?.let { File(it, "bin") }
+            ?.takeIf { File(it, "gradle").canExecute() }
+            ?.absolutePath
 
         // The package to export comes from either a local dir or a Git clone (validated below). For
         // the remote case the clone lives under <rootProject>/.skip-spm/<repo>; effectivePackageDir
@@ -78,6 +88,8 @@ class SkipSpmPlugin : Plugin<Project> {
                 namespacePrefix.set(ext.namespacePrefix)
                 outputDir.set(ext.outputDir.dir(mode))
                 skipVersionCheck.set(ext.skipVersionCheck)
+                gradleInstallBin?.let { gradleInstallBinDir.set(it) }
+                childGradleBuildCache.set(ext.childGradleBuildCache)
             }
         }
 

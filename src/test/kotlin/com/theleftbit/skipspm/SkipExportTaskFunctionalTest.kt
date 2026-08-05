@@ -118,6 +118,58 @@ class SkipExportTaskFunctionalTest {
     }
 
     @Test
+    fun `leads skip children's PATH with the configured gradle and disables their build cache`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val envDump = File(projectDir, "skip-env")
+        val fakeSkip = writeFakeSkip(
+            """
+            printenv PATH > "${envDump.absolutePath}"
+            printenv GRADLE_OPTS >> "${envDump.absolutePath}" || true
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+            """,
+        )
+
+        val result = runner(
+            fakeSkip,
+            extraTaskConfig = """gradleInstallBinDir.set("/fake/gradle-dist/bin")""",
+            extraEnv = mapOf("GRADLE_OPTS" to "-Xmx1g"),
+        ).build()
+
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        val (path, opts) = envDump.readLines().let { it[0] to it.getOrElse(1) { "" } }
+        assertTrue(
+            path.startsWith("/fake/gradle-dist/bin:"),
+            "children's PATH should lead with the configured gradle bin dir, was: $path",
+        )
+        assertContains(opts, "-Xmx1g", message = "inherited GRADLE_OPTS must be preserved")
+        assertContains(opts, "-Dorg.gradle.caching=false")
+    }
+
+    @Test
+    fun `childGradleBuildCache=true leaves the children's build cache alone`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val envDump = File(projectDir, "skip-env")
+        val fakeSkip = writeFakeSkip(
+            """
+            printenv GRADLE_OPTS > "${envDump.absolutePath}" || true
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+            """,
+        )
+
+        val result = runner(
+            fakeSkip,
+            extraTaskConfig = """childGradleBuildCache.set(true)""",
+        ).build()
+
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        val opts = envDump.readLines().firstOrNull().orEmpty()
+        assertFalse(
+            opts.contains("org.gradle.caching=false"),
+            "opt-in must not inject the caching override, was: $opts",
+        )
+    }
+
+    @Test
     fun `warns by default when the skip CLI drifts from the manifest pin`() {
         writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
         val fakeSkip = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
@@ -164,6 +216,7 @@ class SkipExportTaskFunctionalTest {
         fakeSkip: File,
         packageSwift: String = "// swift-tools-version:5.9",
         extraTaskConfig: String = "",
+        extraEnv: Map<String, String> = emptyMap(),
     ): GradleRunner {
         File(pkgDir, "Sources").mkdirs()
         File(pkgDir, "Sources/placeholder.swift").writeText("// swift source")
@@ -190,7 +243,7 @@ class SkipExportTaskFunctionalTest {
             .withProjectDir(projectDir)
             .withPluginClasspath()
             .withArguments("exportTest")
-            .withEnvironment(System.getenv() + ("SKIP_PATH" to fakeSkip.absolutePath))
+            .withEnvironment(System.getenv() + extraEnv + ("SKIP_PATH" to fakeSkip.absolutePath))
     }
 
     /** A fake `skip` CLI: parses `-d <out>` like the real one, then runs [body]. */

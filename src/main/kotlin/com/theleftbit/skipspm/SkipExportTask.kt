@@ -85,6 +85,25 @@ abstract class SkipExportTask : DefaultTask() {
     @get:Internal
     abstract val skipVersionCheck: Property<String>
 
+    /**
+     * `bin` directory of the Gradle installation running this build (the wrapper dist when
+     * launched via `gradlew`/Android Studio). Prepended to the PATH skip's children see, so the
+     * nested per-module builds `skip export` spawns via a bare `gradle` run the same Gradle
+     * version as the outer build — instead of whatever `gradle` happens to be on PATH (Homebrew,
+     * an image-baked one), or nothing at all in CI containers. Not an input — it selects a
+     * toolchain path, never changes the exported AARs.
+     */
+    @get:Internal
+    abstract val gradleInstallBinDir: Property<String>
+
+    /**
+     * Whether skip's nested `gradle` builds may use the Gradle build cache (see
+     * [SkipSpmExtension.childGradleBuildCache]). Default false. Not an input — caching policy,
+     * not output content.
+     */
+    @get:Internal
+    abstract val childGradleBuildCache: Property<Boolean>
+
     @get:Inject
     abstract val execOps: ExecOperations
 
@@ -254,16 +273,29 @@ abstract class SkipExportTask : DefaultTask() {
                 commandLine(command)
                 // skip's native build is gated on SKIP_ENABLED; mirror what the deploy script exported.
                 environment("SKIP_ENABLED", "1")
-                // skip (resolved to an absolute path above) shells out to the Homebrew `gradle`, so
-                // widen the PATH skip passes to its children: the Gradle daemon's own PATH is reduced
-                // when Android Studio launches it via launchd, which would otherwise hide `gradle`.
+                // skip (resolved to an absolute path above) shells out to a bare `gradle` for its
+                // nested per-module builds. Lead the PATH skip passes to its children with the
+                // Gradle installation running THIS build ([gradleInstallBinDir]) so the nested
+                // builds match the outer build's Gradle version; the Homebrew paths stay as
+                // fallback for skip's other child tools, and because the daemon's own PATH is
+                // reduced when Android Studio launches it via launchd.
                 val inheritedPath = System.getenv("PATH").orEmpty()
                 environment(
                     "PATH",
-                    listOf("/opt/homebrew/bin", "/usr/local/bin", inheritedPath)
+                    (listOfNotNull(gradleInstallBinDir.orNull) +
+                        listOf("/opt/homebrew/bin", "/usr/local/bin", inheritedPath))
                         .filter { it.isNotEmpty() }
                         .joinToString(":"),
                 )
+                // The nested builds' expensive step (the Swift cross-compile) is an ad-hoc exec
+                // Gradle can't cache, and on billed remote caches (e.g. Bitrise) every
+                // cache-reading invocation costs money — so by default the children run with the
+                // build cache off. The launcher absorbs `org.gradle.*` system properties from
+                // GRADLE_OPTS and forwards them to its daemon as build options.
+                if (!childGradleBuildCache.getOrElse(false)) {
+                    val inheritedOpts = System.getenv("GRADLE_OPTS").orEmpty()
+                    environment("GRADLE_OPTS", "$inheritedOpts -Dorg.gradle.caching=false".trim())
+                }
                 isIgnoreExitValue = true
                 standardOutput = TeeOutputStream(System.out, outBuf)
                 errorOutput = TeeOutputStream(System.err, errBuf)

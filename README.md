@@ -104,7 +104,9 @@ export then fails with errors like:
   cannot be accessed (doesn't exist)`
 - cascading `Unresolved reference 'SwiftPeerBridged'` (and other skip-bridge runtime symbols) in
   the generated Kotlin
-- "husk" AARs that package successfully but contain no compiled classes
+- "husk" AARs that package successfully but whose `classes.jar` holds no compiled output
+  (metadata-only modules are fine: SkipSwiftUI's `classes.jar` carries Kotlin metadata and zero
+  `.class` entries, and is accepted)
 
 The export task detects all three signatures, deletes `.build/plugins/outputs`, and retries the
 export once from scratch (expect that one build to take as long as a clean export). If even the

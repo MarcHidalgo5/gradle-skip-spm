@@ -188,9 +188,10 @@ abstract class SkipExportTask : DefaultTask() {
 
         // skip export can complete successfully while packaging "husk" AARs — a module whose
         // classes.jar is an empty zip. The breakage then surfaces far away (hundreds of unresolved
-        // references when the consuming app compiles), so validate here: every Skip module compiles
-        // at least some Kotlin, so an AAR with zero .class entries is always a silently broken export.
-        val husks = aars.filterNot(::aarHasCompiledClasses)
+        // references when the consuming app compiles), so validate here. Metadata-only modules are
+        // legitimate, though: e.g. SkipSwiftUI ships a classes.jar holding Kotlin metadata and zero
+        // .class entries, so the check accepts Kotlin metadata as compiled output too.
+        val husks = aars.filterNot(::aarHasCompiledOutput)
         if (husks.isNotEmpty()) {
             throw StaleTranspilerOutputsException(
                 "skip export produced husk AARs (no compiled classes): " + husks.joinToString { it.name },
@@ -459,14 +460,25 @@ internal fun deleteRecursivelyNoFollowLinks(root: File) {
     )
 }
 
-/** True when the AAR has a classes.jar containing at least one compiled class. */
-internal fun aarHasCompiledClasses(aar: File): Boolean {
+/**
+ * True when the AAR has a classes.jar containing compiled output: `.class` files, or Kotlin
+ * metadata for metadata-only modules (SkipSwiftUI packages a classes.jar with Kotlin metadata and
+ * no `.class` entries — a valid export, not a husk). A true husk's classes.jar is an empty zip,
+ * or holds nothing but plain resources.
+ */
+internal fun aarHasCompiledOutput(aar: File): Boolean {
     ZipFile(aar).use { zip ->
         val classesJar = zip.getEntry("classes.jar") ?: return false
         zip.getInputStream(classesJar).use { jar ->
             ZipInputStream(jar).use { entries ->
-                return generateSequence { entries.nextEntry }.any { it.name.endsWith(".class") }
+                return generateSequence { entries.nextEntry }.any { entry ->
+                    COMPILED_OUTPUT_SUFFIXES.any { entry.name.endsWith(it) }
+                }
             }
         }
     }
 }
+
+/** classes.jar entry suffixes that count as compiled output for husk detection. */
+private val COMPILED_OUTPUT_SUFFIXES =
+    listOf(".class", ".kotlin_module", ".kotlin_metadata", ".kotlin_builtins")

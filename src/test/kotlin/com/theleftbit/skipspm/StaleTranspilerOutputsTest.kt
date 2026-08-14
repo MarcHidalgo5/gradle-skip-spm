@@ -58,7 +58,7 @@ class StaleTranspilerOutputsClassifierTest {
     }
 }
 
-class AarHasCompiledClassesTest {
+class AarHasCompiledOutputTest {
 
     private val tempDir = createTempDirectory("skipspm-test").toFile()
 
@@ -70,25 +70,35 @@ class AarHasCompiledClassesTest {
     @Test
     fun `aar with a compiled class is not a husk`() {
         val aar = writeAar("AppData-debug.aar", classesJarEntries = listOf("com/x/Foo.class"))
-        assertTrue(aarHasCompiledClasses(aar))
+        assertTrue(aarHasCompiledOutput(aar))
+    }
+
+    @Test
+    fun `metadata-only aar is not a husk`() {
+        // SkipSwiftUI: classes.jar carries Kotlin metadata and zero .class entries — a valid export.
+        val aar = writeAar(
+            "SkipSwiftUI-debug.aar",
+            classesJarEntries = listOf("META-INF/SkipSwiftUI.kotlin_module"),
+        )
+        assertTrue(aarHasCompiledOutput(aar))
     }
 
     @Test
     fun `aar whose classes jar is an empty zip is a husk`() {
         val aar = writeAar("USLive-debug.aar", classesJarEntries = emptyList())
-        assertFalse(aarHasCompiledClasses(aar))
+        assertFalse(aarHasCompiledOutput(aar))
     }
 
     @Test
     fun `aar without a classes jar is a husk`() {
         val aar = writeAar("Empty-debug.aar", classesJarEntries = null)
-        assertFalse(aarHasCompiledClasses(aar))
+        assertFalse(aarHasCompiledOutput(aar))
     }
 
     @Test
     fun `classes jar with only resources is a husk`() {
         val aar = writeAar("Res-debug.aar", classesJarEntries = listOf("META-INF/MANIFEST.MF", "res.txt"))
-        assertFalse(aarHasCompiledClasses(aar))
+        assertFalse(aarHasCompiledOutput(aar))
     }
 
     /** Builds `<name>` in [tempDir]: an AAR zip whose classes.jar holds [classesJarEntries] (null = no classes.jar). */

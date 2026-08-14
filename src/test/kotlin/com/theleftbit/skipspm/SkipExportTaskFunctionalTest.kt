@@ -98,7 +98,32 @@ class SkipExportTaskFunctionalTest {
 
         assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
         assertContains(result.output, "husk AARs")
-        assertTrue(aarHasCompiledClasses(File(projectDir, "lib/debug/TestModule-debug.aar")))
+        assertTrue(aarHasCompiledOutput(File(projectDir, "lib/debug/TestModule-debug.aar")))
+    }
+
+    @Test
+    fun `metadata-only AAR is accepted without a self-heal`() {
+        // Regression (0.5.0): SkipSwiftUI's classes.jar holds Kotlin metadata and zero .class
+        // entries; the husk check misread it, self-healed, and failed again on the same output.
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        writeAar(fixturesDir, "SkipSwiftUI-debug.aar", listOf("META-INF/SkipSwiftUI.kotlin_module"))
+        val fakeSkip = writeFakeSkip(
+            """
+            if [ -f "${invocationMarker.absolutePath}" ]; then
+              echo "fake skip invoked twice: a metadata-only AAR must not trigger a self-heal" >&2
+              exit 1
+            fi
+            touch "${invocationMarker.absolutePath}"
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+            """,
+        )
+        transpilerOutputs.mkdirs()
+
+        val result = runner(fakeSkip).build()
+
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertFalse(result.output.contains("husk AARs"))
+        assertTrue(File(projectDir, "lib/debug/SkipSwiftUI-debug.aar").isFile)
     }
 
     @Test
